@@ -1,52 +1,51 @@
-# Spring Saga Orchestration - E-Commerce Demo
+# Spring Saga Orchestration (Event-Driven) - E-Commerce Demo
 
-Demo pattern **Saga Orchestration** với Spring Boot 3.3 + Java 21 cho bài toán e-commerce.
+A microservices e-commerce demonstration implementing the **Saga Orchestration** pattern using **Spring Boot 3.3, Java 21, and RabbitMQ**. This project transitioned from synchronous HTTP communication to a fully asynchronous, event-driven architecture to ensure high availability, decoupling, and robustness.
 
-## Kiến trúc
+## Architecture Overview
 
-```
+```text
 POST /api/orders
-        │
+        │ (1. Return 201 Created immediately)
         ▼
-  ┌─────────────┐
-  │ order-service│  ← Saga Orchestrator (port 8081)
-  │  :8081      │
-  └──────┬──────┘
-         │
-         ├─── Step 1: Process Payment ──► payment-service :8082
-         │                                   └── compensation: refundPayment
-         │
-         └─── Step 2: Reserve Inventory ─► inventory-service :8083
-                                               └── compensation: releaseReservation
+  ┌─────────────┐                      [ RabbitMQ ] (saga.exchange)
+  │ order-service│ ──────(Commands)─────► │
+  │ (Orchestrator)│ ◄─────(Replies)─────── │
+  └─────────────┘                          │
+                                           ├──► payment.commands Queue ──► [ payment-service ]
+                                           │
+                                           └──► inventory.commands Queue ──► [ inventory-service ]
 ```
 
-## Services
+## Services Portfolio
 
-| Service | Port | DB | Vai trò |
-|---------|------|----|---------|
-| `order-service` | 8081 | order_db:5432 | **Orchestrator** - điều phối saga |
-| `payment-service` | 8082 | payment_db:5433 | Participant - xử lý thanh toán |
-| `inventory-service` | 8083 | inventory_db:5434 | Participant - quản lý tồn kho |
+| Service | Port | Database | Role |
+|---------|------|----------|------|
+| `order-service` | 8081 | `order_db:5432` | **Saga Orchestrator** - Coordinates the saga via a State Machine stored in DB |
+| `payment-service` | 8082 | `payment_db:5433` | **Saga Participant** - Handles payment processing and refunds |
+| `inventory-service` | 8083 | `inventory_db:5434` | **Saga Participant** - Handles stock reservation and releasing |
+| `rabbitmq` | 5672 | N/A | **Message Broker** - Routes commands and events (15672 for Management UI) |
 
-## Các tính năng chính
+## Key Features
 
-- ✅ **SagaStep<T>** - Generic step với action + compensation + retry
-- ✅ **SagaExecutor** - Tự động rollback (compensate) khi step thất bại
-- ✅ **Idempotency** - Chống duplicate request bằng `idempotencyKey`
-- ✅ **Exponential Backoff** - Retry compensation với backoff tăng dần
-- ✅ **Pessimistic Locking** - Tránh overselling trong inventory
-- ✅ **Metrics** - `@SagaStepMetric` AOP aspect + Micrometer/Prometheus
-- ✅ **Actuator** - Health check endpoint
+- ✅ **Asynchronous Orchestration:** Uses RabbitMQ (`TopicExchange`) for non-blocking Command/Reply messaging.
+- ✅ **State Persistence:** `order-service` stores the saga state (`SagaState`) in the database to survive crashes.
+- ✅ **Automatic Compensation (Rollback):** If inventory fails, the orchestrator issues a `RefundPaymentCommand` to safely rollback the payment step.
+- ✅ **Idempotency:** Implemented using `idempotencyKey` across all services to prevent duplicate processing during network retries.
+- ✅ **Pessimistic Locking:** Prevents stock overselling under concurrent load in `inventory-service`.
 
 ## Quick Start
 
-### 1. Khởi động databases
+### 1. Start Infrastructure (PostgreSQL & RabbitMQ)
 
 ```bash
 docker-compose up -d
 ```
+*Wait a few seconds for RabbitMQ and PostgreSQL to initialize.*
 
-### 2. Chạy từng service
+### 2. Run the Microservices
+
+Open 3 separate terminals and run:
 
 ```bash
 # Terminal 1 - Order Service (Orchestrator)
@@ -59,9 +58,13 @@ cd payment-service && ./mvnw spring-boot:run
 cd inventory-service && ./mvnw spring-boot:run
 ```
 
-## API Examples
+## API Testing Examples
 
-### Tạo đơn hàng (Happy Path)
+You can use the provided `api-test.http` file in the root directory to test these endpoints directly from IntelliJ or VS Code.
+
+### 1. Create Order (Happy Path)
+
+Because it's asynchronous, the API returns `201 Created` immediately with a `PENDING` status. The actual saga runs in the background.
 
 ```bash
 curl -X POST http://localhost:8081/api/orders \
@@ -75,20 +78,15 @@ curl -X POST http://localhost:8081/api/orders \
   }'
 ```
 
-**Response khi thành công:**
-```json
-{
-  "success": true,
-  "orderId": "uuid...",
-  "message": "Saga completed successfully",
-  "order": {
-    "status": "COMPLETED",
-    ...
-  }
-}
+**Verify completion:** Wait 1 second and check the order status:
+```bash
+curl http://localhost:8081/api/orders/{orderId}
 ```
+*(Status should be `COMPLETED`)*
 
-### Simulate failure (Payment vượt limit > 10000)
+### 2. Simulate Payment Failure (Saga fails fast)
+
+*Business Rule: Payments over $10,000 are rejected.*
 
 ```bash
 curl -X POST http://localhost:8081/api/orders \
@@ -101,115 +99,73 @@ curl -X POST http://localhost:8081/api/orders \
     "idempotencyKey": "order-key-002"
   }'
 ```
+*(Order will quickly transition to `CANCELLED` and SagaState to `FAILED`)*
 
-**Response khi fail (saga tự rollback):**
-```json
-{
-  "success": false,
-  "message": "Saga failed at step: process-payment - Payment amount exceeds limit: 15000.00",
-  "failedStep": "process-payment"
-}
-```
+### 3. Simulate Inventory Failure (Triggers Compensation/Refund)
 
-### Simulate failure (Inventory không đủ)
+*Business Rule: Order an invalid product ID.*
 
 ```bash
 curl -X POST http://localhost:8081/api/orders \
   -H "Content-Type: application/json" \
   -d '{
     "customerId": "CUST-001",
-    "productId": "PROD-999",
+    "productId": "PROD-NOTEXIST",
     "quantity": 1,
     "unitPrice": 100.00,
     "idempotencyKey": "order-key-003"
   }'
 ```
+**What happens behind the scenes:**
+1. Payment succeeds.
+2. Inventory fails (product not found).
+3. Orchestrator receives failure event.
+4. Orchestrator triggers `RefundPaymentCommand`.
+5. Order becomes `CANCELLED`.
 
-### Idempotency Test (gửi lại request cũ)
+## Detailed Saga Flow (Event-Driven)
 
-```bash
-# Gửi lần 2 với cùng idempotencyKey - sẽ trả về kết quả cũ, KHÔNG tạo order mới
-curl -X POST http://localhost:8081/api/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "customerId": "CUST-001",
-    "productId": "PROD-001",
-    "quantity": 2,
-    "unitPrice": 999.99,
-    "idempotencyKey": "order-key-001"
-  }'
+```mermaid
+sequenceDiagram
+    participant OrderService
+    participant RabbitMQ
+    participant PaymentService
+    participant InventoryService
+
+    Note over OrderService: 1. Init Order (PENDING)
+    OrderService->>RabbitMQ: [ProcessPaymentCommand]
+    
+    RabbitMQ->>PaymentService: consume
+    alt Success
+        PaymentService->>RabbitMQ: [PaymentReplyEvent] (success=true)
+        RabbitMQ->>OrderService: consume
+        OrderService->>RabbitMQ: [ReserveInventoryCommand]
+        
+        RabbitMQ->>InventoryService: consume
+        alt Success
+            InventoryService->>RabbitMQ: [InventoryReplyEvent] (success=true)
+            RabbitMQ->>OrderService: consume
+            Note over OrderService: 2. Update Order (COMPLETED)
+        else Fails (e.g., Out of stock)
+            InventoryService->>RabbitMQ: [InventoryReplyEvent] (success=false)
+            RabbitMQ->>OrderService: consume
+            Note over OrderService: 3. Update Order (CANCELLED)
+            OrderService->>RabbitMQ: [RefundPaymentCommand] (Compensation)
+            RabbitMQ->>PaymentService: consume & refund
+        end
+    else Fails (e.g., Limit exceeded)
+        PaymentService->>RabbitMQ: [PaymentReplyEvent] (success=false)
+        RabbitMQ->>OrderService: consume
+        Note over OrderService: 4. Update Order (CANCELLED)
+    end
 ```
 
-### Lấy thông tin order
+## Default Demo Data
 
-```bash
-curl http://localhost:8081/api/orders/{orderId}
-curl http://localhost:8081/api/orders/customer/CUST-001
-```
+The `inventory-service` auto-seeds three products upon startup:
 
-### Metrics (Prometheus)
-
-```bash
-curl http://localhost:8081/actuator/prometheus | grep saga
-```
-
-## Saga Flow Chi Tiết
-
-```
-Order PENDING
-     │
-     ├─[Step 1: process-payment]──────────────────────────────────────────┐
-     │   Order → PAYMENT_PROCESSING                                        │
-     │   paymentClient.processPayment(...)                                 │
-     │   ✅ Success → tiếp tục                                             │
-     │   ❌ Fail → Order CANCELLED (không cần compensate step trước)       │
-     │                                                                      │
-     ├─[Step 2: reserve-inventory]─────────────────────────────────────────┤
-     │   Order → INVENTORY_RESERVING                                       │
-     │   inventoryClient.reserveStock(...)                                 │
-     │   ✅ Success → tiếp tục                                             │
-     │   ❌ Fail → compensate step 1: paymentClient.refundPayment(...)     │
-     │             Order CANCELLED                                          │
-     │                                                                      │
-     └─[All steps OK] → Order COMPLETED ◄────────────────────────────────-┘
-```
-
-## Cấu trúc code
-
-```
-spring-saga-orchestration/
-├── docker-compose.yml
-├── order-service/               # Orchestrator
-│   └── src/main/java/.../
-│       ├── saga/
-│       │   ├── SagaStep.java        # Generic saga step
-│       │   └── SagaExecutor.java    # Orchestrator engine
-│       ├── monitoring/
-│       │   ├── SagaStepMetric.java  # Custom annotation
-│       │   └── SagaMetricsAspect.java # AOP metrics
-│       ├── client/
-│       │   ├── PaymentClient.java
-│       │   └── InventoryClient.java
-│       ├── service/OrderService.java # Saga builder
-│       └── controller/OrderController.java
-├── payment-service/             # Participant
-│   └── src/main/java/.../
-│       ├── domain/Payment.java
-│       ├── service/PaymentService.java  # Idempotent
-│       └── controller/PaymentController.java
-└── inventory-service/           # Participant
-    └── src/main/java/.../
-        ├── domain/{Product,Reservation}.java
-        ├── service/InventoryService.java  # Pessimistic lock
-        └── controller/InventoryController.java
-```
-
-## Sản phẩm mặc định (auto-seed)
-
-inventory-service tự seed 3 sản phẩm khi khởi động:
-
-| ID | Tên | Số lượng |
-|----|-----|----------|
+| ID | Name | Initial Quantity |
+|----|------|------------------|
 | PROD-001 | Laptop Pro | 100 |
 | PROD-002 | Wireless Mouse | 500 |
 | PROD-003 | USB-C Hub | 200 |
