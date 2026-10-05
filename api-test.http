@@ -1,0 +1,148 @@
+### ============================================
+### ORDER SERVICE - Saga Orchestration Test
+### ============================================
+
+### [1] HAPPY PATH - Tạo order thành công
+POST http://localhost:8081/api/orders
+Content-Type: application/json
+
+{
+  "customerId": "CUST-001",
+  "productId": "PROD-001",
+  "quantity": 2,
+  "unitPrice": 999.99,
+  "idempotencyKey": "order-test-001"
+}
+
+###
+
+### [2] IDEMPOTENCY - Gửi lại request cũ → trả về order cũ, KHÔNG tạo mới
+POST http://localhost:8081/api/orders
+Content-Type: application/json
+
+{
+  "customerId": "CUST-001",
+  "productId": "PROD-001",
+  "quantity": 2,
+  "unitPrice": 999.99,
+  "idempotencyKey": "order-test-001"
+}
+
+###
+
+### [3] SAGA ROLLBACK - Payment fail (amount > 10000) → auto compensate
+POST http://localhost:8081/api/orders
+Content-Type: application/json
+
+{
+  "customerId": "CUST-001",
+  "productId": "PROD-001",
+  "quantity": 1,
+  "unitPrice": 15000.00,
+  "idempotencyKey": "order-fail-payment-001"
+}
+
+###
+
+### [4] SAGA ROLLBACK - Inventory fail (product không tồn tại)
+POST http://localhost:8081/api/orders
+Content-Type: application/json
+
+{
+  "customerId": "CUST-001",
+  "productId": "PROD-NOTEXIST",
+  "quantity": 1,
+  "unitPrice": 100.00,
+  "idempotencyKey": "order-fail-inventory-001"
+}
+
+###
+
+### [5] SAGA ROLLBACK - Inventory fail (hết hàng - order quá nhiều)
+POST http://localhost:8081/api/orders
+Content-Type: application/json
+
+{
+  "customerId": "CUST-001",
+  "productId": "PROD-001",
+  "quantity": 99999,
+  "unitPrice": 10.00,
+  "idempotencyKey": "order-fail-stock-001"
+}
+
+###
+
+### [6] Lấy thông tin 1 order (thay {orderId} bằng UUID thực)
+GET http://localhost:8081/api/orders/{{orderId}}
+
+###
+
+### [7] Lấy tất cả order của customer
+GET http://localhost:8081/api/orders/customer/CUST-001
+
+###
+
+### ============================================
+### PAYMENT SERVICE
+### ============================================
+
+### [8] Lấy thông tin payment (thay {paymentId} bằng UUID thực)
+GET http://localhost:8082/api/payments/{{paymentId}}
+
+###
+
+### [9] Refund payment thủ công
+DELETE http://localhost:8082/api/payments/{{paymentId}}/refund
+
+###
+
+### ============================================
+### INVENTORY SERVICE
+### ============================================
+
+### [10] Reserve stock trực tiếp
+POST http://localhost:8083/api/inventory/reserve
+Content-Type: application/json
+
+{
+  "orderId": "00000000-0000-0000-0000-000000000001",
+  "productId": "PROD-002",
+  "quantity": 5,
+  "idempotencyKey": "inv-test-001"
+}
+
+###
+
+### [11] Release reservation (thay {reservationId} bằng UUID thực)
+DELETE http://localhost:8083/api/inventory/reservations/{{reservationId}}
+
+###
+
+### [12] Lấy thông tin reservation
+GET http://localhost:8083/api/inventory/reservations/{{reservationId}}
+
+###
+
+### ============================================
+### HEALTH CHECK
+### ============================================
+
+### [13] Health check order-service
+GET http://localhost:8081/actuator/health
+
+###
+
+### [14] Health check payment-service
+GET http://localhost:8082/actuator/health
+
+###
+
+### [15] Health check inventory-service
+GET http://localhost:8083/actuator/health
+
+###
+
+### [16] Metrics (Prometheus)
+GET http://localhost:8081/actuator/prometheus
+
+###
