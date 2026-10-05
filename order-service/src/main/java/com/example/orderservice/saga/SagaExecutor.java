@@ -33,10 +33,10 @@ public class SagaExecutor {
             try {
                 Object result = step.execute();
                 completedResults.add(result);
-                log.info("[SAGA {}] Step '{}' completed successfully", sagaId, step.getName());
+                log.info("[SAGA {}] Step '{}' completed successfully", sagaId, step.name());
             } catch (Exception e) {
-                log.error("[SAGA {}] Step '{}' failed: {}", sagaId, step.getName(), e.getMessage());
-                String failedStep = step.getName();
+                log.error("[SAGA {}] Step '{}' failed: {}", sagaId, step.name(), e.getMessage());
+                String failedStep = step.name();
                 compensateCompleted(i - 1);
                 return SagaResult.builder()
                         .success(false)
@@ -63,7 +63,7 @@ public class SagaExecutor {
                 step.compensate(result);
             } catch (CompensationFailedException e) {
                 log.error("[SAGA {}] CRITICAL: Compensation failed for step '{}': {}",
-                        sagaId, step.getName(), e.getMessage());
+                        sagaId, step.name(), e.getMessage());
                 // Continue compensating other steps even if one fails
             }
         }

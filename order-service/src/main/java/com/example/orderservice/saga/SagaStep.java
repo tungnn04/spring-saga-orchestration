@@ -7,25 +7,9 @@ import org.slf4j.LoggerFactory;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-public class SagaStep<T> {
+public record SagaStep<T>(String name, Supplier<T> action, Consumer<T> compensation, int maxRetries) {
 
     private static final Logger log = LoggerFactory.getLogger(SagaStep.class);
-
-    private final String name;
-    private final Supplier<T> action;
-    private final Consumer<T> compensation;
-    private final int maxRetries;
-
-    public SagaStep(String name, Supplier<T> action, Consumer<T> compensation, int maxRetries) {
-        this.name = name;
-        this.action = action;
-        this.compensation = compensation;
-        this.maxRetries = maxRetries;
-    }
-
-    public String getName() {
-        return name;
-    }
 
     public T execute() {
         log.info("[SAGA] Executing step: {}", name);

@@ -1,20 +1,22 @@
 package com.example.orderservice.service;
 
-import com.example.orderservice.client.InventoryClient;
-import com.example.orderservice.client.PaymentClient;
 import com.example.orderservice.domain.Order;
 import com.example.orderservice.domain.OrderStatus;
-import com.example.orderservice.dto.*;
+import com.example.orderservice.domain.SagaState;
+import com.example.orderservice.dto.OrderRequest;
+import com.example.orderservice.dto.OrderResponse;
+import com.example.orderservice.dto.SagaResult;
+import com.example.orderservice.dto.messaging.ProcessPaymentCommand;
 import com.example.orderservice.exception.SagaExecutionException;
-import com.example.orderservice.monitoring.SagaStepMetric;
 import com.example.orderservice.repository.OrderRepository;
-import com.example.orderservice.saga.SagaExecutor;
-import com.example.orderservice.saga.SagaStep;
+import com.example.orderservice.repository.SagaStateRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -24,18 +26,17 @@ public class OrderService {
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
     private final OrderRepository orderRepository;
-    private final PaymentClient paymentClient;
-    private final InventoryClient inventoryClient;
+    private final SagaStateRepository sagaStateRepository;
+    private final RabbitTemplate rabbitTemplate;
 
     public OrderService(OrderRepository orderRepository,
-                        PaymentClient paymentClient,
-                        InventoryClient inventoryClient) {
+                        SagaStateRepository sagaStateRepository,
+                        RabbitTemplate rabbitTemplate) {
         this.orderRepository = orderRepository;
-        this.paymentClient = paymentClient;
-        this.inventoryClient = inventoryClient;
+        this.sagaStateRepository = sagaStateRepository;
+        this.rabbitTemplate = rabbitTemplate;
     }
 
-    @SagaStepMetric
     @Transactional
     public SagaResult createOrder(OrderRequest request) {
         log.info("[ORDER-SERVICE] Received order request with idempotencyKey: {}", request.getIdempotencyKey());
@@ -67,58 +68,35 @@ public class OrderService {
                 .build();
         order = orderRepository.save(order);
 
-        final Order savedOrder = order;
+        Order savedOrder = order;
         log.info("[ORDER-SERVICE] Order created with id: {}", savedOrder.getId());
 
-        // Build and execute the saga
-        SagaExecutor executor = new SagaExecutor(savedOrder.getId().toString());
+        // Save new SagaState in STARTED state
+        SagaState sagaState = SagaState.builder()
+                .id(UUID.randomUUID().toString())
+                .orderId(savedOrder.getId())
+                .currentStep("payment")
+                .status("STARTED")
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+        sagaStateRepository.save(sagaState);
 
-        // Step: Process Payment
-        executor.addStep(new SagaStep<>(
-                "process-payment",
-                () -> {
-                    updateOrderStatus(savedOrder.getId(), OrderStatus.PAYMENT_PROCESSING);
-                    PaymentRequest paymentRequest = PaymentRequest.builder()
-                            .orderId(savedOrder.getId())
-                            .customerId(savedOrder.getCustomerId())
-                            .amount(savedOrder.getTotalAmount())
-                            .idempotencyKey("payment-" + savedOrder.getIdempotencyKey())
-                            .build();
-                    return paymentClient.processPayment(paymentRequest);
-                },
-                payment -> paymentClient.refundPayment(payment.getId()),
-                3
-        ));
+        // Send ProcessPaymentCommand to RabbitMQ
+        ProcessPaymentCommand command = ProcessPaymentCommand.builder()
+                .orderId(savedOrder.getId())
+                .amount(savedOrder.getTotalAmount())
+                .customerId(savedOrder.getCustomerId())
+                .idempotencyKey("payment-" + savedOrder.getIdempotencyKey())
+                .build();
+        rabbitTemplate.convertAndSend("saga.exchange", "payment.command.process", command);
 
-        // Step: Reserve Inventory
-        executor.addStep(new SagaStep<>(
-                "reserve-inventory",
-                () -> {
-                    updateOrderStatus(savedOrder.getId(), OrderStatus.INVENTORY_RESERVING);
-                    InventoryRequest inventoryRequest = InventoryRequest.builder()
-                            .orderId(savedOrder.getId())
-                            .productId(savedOrder.getProductId())
-                            .quantity(savedOrder.getQuantity())
-                            .idempotencyKey("inventory-" + savedOrder.getIdempotencyKey())
-                            .build();
-                    return inventoryClient.reserveStock(inventoryRequest);
-                },
-                reservation -> inventoryClient.releaseReservation(reservation.getId()),
-                3
-        ));
-
-        SagaResult result = executor.run();
-
-        if (result.isSuccess()) {
-            updateOrderStatus(savedOrder.getId(), OrderStatus.COMPLETED);
-            Order completed = orderRepository.findById(savedOrder.getId()).orElse(savedOrder);
-            result.setOrderId(savedOrder.getId().toString());
-            result.setOrder(mapToResponse(completed));
-        } else {
-            updateOrderStatus(savedOrder.getId(), OrderStatus.CANCELLED);
-        }
-
-        return result;
+        return SagaResult.builder()
+                .success(true)
+                .message("Order creation initiated")
+                .orderId(savedOrder.getId().toString())
+                .order(mapToResponse(savedOrder))
+                .build();
     }
 
     public OrderResponse getOrder(UUID orderId) {
